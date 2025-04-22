@@ -26,15 +26,16 @@ type OperatorStageName string
 type OperatorStageStatus string
 
 const (
-	OperatorStageGrafanaConfig  OperatorStageName = "config"
-	OperatorStageAdminUser      OperatorStageName = "admin user"
-	OperatorStagePvc            OperatorStageName = "pvc"
-	OperatorStageServiceAccount OperatorStageName = "service account"
-	OperatorStageService        OperatorStageName = "service"
-	OperatorStageIngress        OperatorStageName = "ingress"
-	OperatorStagePlugins        OperatorStageName = "plugins"
-	OperatorStageDeployment     OperatorStageName = "deployment"
-	OperatorStageComplete       OperatorStageName = "complete"
+	OperatorStageGrafanaConfig          OperatorStageName = "config"
+	OperatorStageAdminUser              OperatorStageName = "admin user"
+	OperatorStagePvc                    OperatorStageName = "pvc"
+	OperatorStageServiceAccount         OperatorStageName = "service account"
+	OperatorStageService                OperatorStageName = "service"
+	OperatorStageIngress                OperatorStageName = "ingress"
+	OperatorStagePlugins                OperatorStageName = "plugins"
+	OperatorStageDeployment             OperatorStageName = "deployment"
+	OperatorStageGrafanaServiceAccounts OperatorStageName = "grafana service-accounts"
+	OperatorStageComplete               OperatorStageName = "complete"
 )
 
 const (
@@ -50,6 +51,34 @@ type OperatorReconcileVars struct {
 
 	// env var value for installed plugins
 	Plugins string
+}
+
+type GrafanaServiceAccountToken struct {
+	// Name of the token (also used as Secret name).
+	Name string `json:"name"`
+	// Expiration timestamp (RFC3339). Optional.
+	// +kubebuilder:validation:Optional
+	Expires *metav1.Time `json:"expires,omitempty"`
+}
+
+type GrafanaServiceAccount struct {
+	// Display name inside Grafana.
+	Name string `json:"name"`
+	// Grafana role. Allowed values: Viewer, Editor, Admin.
+	// +kubebuilder:validation:Enum=Viewer;Editor;Admin
+	Role string `json:"role"`
+	// List of API tokens for this account.
+	// +kubebuilder:validation:Optional
+	Tokens []GrafanaServiceAccountToken `json:"tokens,omitempty"`
+}
+
+type GrafanaServiceAccountSection struct {
+	// Automatically create <Secret> objects with token values.
+	// +kubebuilder:default=true
+	GenerateTokenSecret bool `json:"generateTokenSecret,omitempty"`
+	// Desired service accounts.
+	// +kubebuilder:validation:Optional
+	Accounts []GrafanaServiceAccount `json:"accounts,omitempty"`
 }
 
 // GrafanaSpec defines the desired state of Grafana
@@ -80,6 +109,9 @@ type GrafanaSpec struct {
 	Preferences *GrafanaPreferences `json:"preferences,omitempty"`
 	// DisableDefaultAdminSecret prevents operator from creating default admin-credentials secret
 	DisableDefaultAdminSecret bool `json:"disableDefaultAdminSecret,omitempty"`
+	// Declarative Grafana Service Accounts (tokens will be synced automatically).
+	// +kubebuilder:validation:Optional
+	GrafanaServiceAccounts *GrafanaServiceAccountSection `json:"grafanaServiceAccounts,omitempty"`
 }
 
 type External struct {
@@ -133,16 +165,17 @@ type GrafanaPreferences struct {
 
 // GrafanaStatus defines the observed state of Grafana
 type GrafanaStatus struct {
-	Stage         OperatorStageName      `json:"stage,omitempty"`
-	StageStatus   OperatorStageStatus    `json:"stageStatus,omitempty"`
-	LastMessage   string                 `json:"lastMessage,omitempty"`
-	AdminURL      string                 `json:"adminUrl,omitempty"`
-	ContactPoints NamespacedResourceList `json:"contactPoints,omitempty"`
-	Dashboards    NamespacedResourceList `json:"dashboards,omitempty"`
-	Datasources   NamespacedResourceList `json:"datasources,omitempty"`
-	Folders       NamespacedResourceList `json:"folders,omitempty"`
-	LibraryPanels NamespacedResourceList `json:"libraryPanels,omitempty"`
-	Version       string                 `json:"version,omitempty"`
+	Stage           OperatorStageName      `json:"stage,omitempty"`
+	StageStatus     OperatorStageStatus    `json:"stageStatus,omitempty"`
+	LastMessage     string                 `json:"lastMessage,omitempty"`
+	AdminURL        string                 `json:"adminUrl,omitempty"`
+	ContactPoints   NamespacedResourceList `json:"contactPoints,omitempty"`
+	Dashboards      NamespacedResourceList `json:"dashboards,omitempty"`
+	Datasources     NamespacedResourceList `json:"datasources,omitempty"`
+	Folders         NamespacedResourceList `json:"folders,omitempty"`
+	LibraryPanels   NamespacedResourceList `json:"libraryPanels,omitempty"`
+	ServiceAccounts NamespacedResourceList `json:"serviceAccounts,omitempty"`
+	Version         string                 `json:"version,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -26,6 +26,7 @@ vendor
 *~
 
 .vscode/
+.mirrord/
 .DS_Store
 
 # Audit lab

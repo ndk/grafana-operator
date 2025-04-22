@@ -11570,6 +11570,52 @@ spec:
                 required:
                 - url
                 type: object
+              grafanaServiceAccounts:
+                description: Declarative Grafana Service Accounts (tokens will be
+                  synced automatically).
+                properties:
+                  accounts:
+                    description: Desired service accounts.
+                    items:
+                      properties:
+                        name:
+                          description: Display name inside Grafana.
+                          type: string
+                        role:
+                          description: 'Grafana role. Allowed values: Viewer, Editor,
+                            Admin.'
+                          enum:
+                          - Viewer
+                          - Editor
+                          - Admin
+                          type: string
+                        tokens:
+                          description: List of API tokens for this account.
+                          items:
+                            properties:
+                              expires:
+                                description: Expiration timestamp (RFC3339). Optional.
+                                format: date-time
+                                type: string
+                              name:
+                                description: Name of the token (also used as Secret
+                                  name).
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                      required:
+                      - name
+                      - role
+                      type: object
+                    type: array
+                  generateTokenSecret:
+                    default: true
+                    description: Automatically create <Secret> objects with token
+                      values.
+                    type: boolean
+                type: object
               ingress:
                 description: Ingress sets how the ingress object should look like
                   with your grafana instance.
@@ -12768,6 +12814,10 @@ spec:
               lastMessage:
                 type: string
               libraryPanels:
+                items:
+                  type: string
+                type: array
+              serviceAccounts:
                 items:
                   type: string
                 type: array
