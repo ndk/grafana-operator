@@ -1,84 +1,115 @@
-package grafana
+package controllers
 
 import (
 	"context"
+	"crypto/sha1"
 	"errors"
-
-	// sha1 is used to generate a hash for the secret name.
-	"crypto/sha1" // nolint:gosec
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	kuberr "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	genapi "github.com/grafana/grafana-openapi-client-go/client"
 	"github.com/grafana/grafana-openapi-client-go/client/service_accounts"
 	"github.com/grafana/grafana-openapi-client-go/models"
-	v1beta1 "github.com/grafana/grafana-operator/v5/api/v1beta1"
+	"github.com/grafana/grafana-operator/v5/api/v1beta1"
 	client2 "github.com/grafana/grafana-operator/v5/controllers/client"
 	model2 "github.com/grafana/grafana-operator/v5/controllers/model"
 )
 
-func isEqualExpirationTime(a, b *metav1.Time) bool {
-	// Grafana API doesn't allow to set expiration time for tokens. Instead of it,
-	// Grafana accepts TTL then calculates the expiration time against the current time.
-	// So, we cannot just compare the expiration time with the spec' one.
-	// Let's assume that two expiration times are equal if they are close enough.
-	const expiresDrift = 1 * time.Second
+const conditionServiceAccountsSynced = "ServiceAccountsSynchronized"
 
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	diff := a.Sub(b.Time)
-	return diff.Abs() <= expiresDrift
+type GrafanaServiceAccountController struct {
+	client.Client
+	Scheme *runtime.Scheme
 }
 
-func ptr[T any](v T) *T { return &v }
+func (r *GrafanaServiceAccountController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := logf.FromContext(ctx).WithName("GrafanaServiceAccountController")
+	ctx = logf.IntoContext(ctx, log)
 
-type GrafanaServiceAccountReconciler struct{ client client.Client }
-
-func NewGrafanaServiceAccountReconciler(c client.Client) *GrafanaServiceAccountReconciler {
-	return &GrafanaServiceAccountReconciler{client: c}
-}
-
-// Reconcile ensures service‑accounts/tokens match the spec and updates status.ServiceAccounts.
-func (r *GrafanaServiceAccountReconciler) Reconcile(
-	ctx context.Context,
-	cr *v1beta1.Grafana,
-	_ *v1beta1.OperatorReconcileVars,
-	scheme *runtime.Scheme,
-) (v1beta1.OperatorStageStatus, error) {
-	ctx = logf.IntoContext(ctx, logf.FromContext(ctx).WithName("serviceAccountReconciler"))
-
-	if cr.Spec.GrafanaServiceAccounts == nil {
-		// No service accounts to reconcile.
-		return v1beta1.OperatorStageResultSuccess, nil
-	}
-
-	gClient, err := client2.NewGeneratedGrafanaClient(ctx, r.client, cr)
+	cr := &v1beta1.Grafana{}
+	err := r.Get(ctx, req.NamespacedName, cr)
 	if err != nil {
-		return v1beta1.OperatorStageResultFailed, fmt.Errorf("building grafana client: %w", err)
+		if kuberr.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("getting Grafana: %w", err)
 	}
 
-	err = r.reconcileAccounts(ctx, cr, gClient, scheme)
+	if cr.Spec.GrafanaServiceAccounts == nil && cr.Status.GrafanaServiceAccounts == nil {
+		return ctrl.Result{}, nil
+	}
+
+	gClient, err := client2.NewGeneratedGrafanaClient(ctx, r.Client, cr)
 	if err != nil {
-		return v1beta1.OperatorStageResultFailed, err
+		return ctrl.Result{}, fmt.Errorf("building grafana client: %w", err)
 	}
 
-	return v1beta1.OperatorStageResultSuccess, nil
+	defer func(recErr *error) {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &v1beta1.Grafana{}
+			err := r.Client.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}, latest)
+			if err != nil {
+				return fmt.Errorf("getting Grafana %s/%s: %w", cr.Namespace, cr.Name, err)
+			}
+
+			latest.Status.GrafanaServiceAccounts = cr.Status.GrafanaServiceAccounts
+			meta.RemoveStatusCondition(&latest.Status.Conditions, conditionServiceAccountsSynced)
+
+			cond := metav1.Condition{
+				Type:               conditionServiceAccountsSynced,
+				ObservedGeneration: cr.Generation,
+				LastTransitionTime: metav1.Time{Time: time.Now()},
+			}
+			if recErr == nil {
+				cond.Status = metav1.ConditionTrue
+				cond.Reason = conditionApplySuccessful
+				cond.Message = "service accounts reconciled"
+			} else {
+				cond.Status = metav1.ConditionFalse
+				cond.Reason = conditionApplyFailed
+				cond.Message = (*recErr).Error()
+			}
+			meta.SetStatusCondition(&latest.Status.Conditions, cond)
+
+			return r.Status().Update(ctx, latest)
+		})
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "updating Grafana status")
+		}
+	}(&err)
+
+	return ctrl.Result{}, r.reconcileAccounts(ctx, cr, gClient, r.Scheme)
 }
 
-func (r *GrafanaServiceAccountReconciler) reconcileAccounts(
+func (r *GrafanaServiceAccountController) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&v1beta1.Grafana{},
+			builder.WithPredicates(
+				ignoreStatusUpdates(),
+				serviceAccountSpecChanged(),
+			)).
+		Owns(&corev1.Secret{}).
+		WithOptions(controller.Options{RateLimiter: defaultRateLimiter()}).
+		Named("grafanaserviceaccount").
+		Complete(r)
+}
+
+func (r *GrafanaServiceAccountController) reconcileAccounts(
 	ctx context.Context,
 	cr *v1beta1.Grafana,
 	gClient *genapi.GrafanaHTTPAPI,
@@ -147,7 +178,7 @@ func (r *GrafanaServiceAccountReconciler) reconcileAccounts(
 	return nil
 }
 
-func (r *GrafanaServiceAccountReconciler) removeAccount(
+func (r *GrafanaServiceAccountController) removeAccount(
 	ctx context.Context,
 	cr *v1beta1.Grafana,
 	gClient *genapi.GrafanaHTTPAPI,
@@ -173,7 +204,7 @@ func (r *GrafanaServiceAccountReconciler) removeAccount(
 	return nil
 }
 
-func (r *GrafanaServiceAccountReconciler) reconcileAccount(
+func (r *GrafanaServiceAccountController) reconcileAccount(
 	ctx context.Context,
 	cr *v1beta1.Grafana,
 	gClient *genapi.GrafanaHTTPAPI,
@@ -225,7 +256,7 @@ func (r *GrafanaServiceAccountReconciler) reconcileAccount(
 }
 
 // reconcileTokens ensures tokens match the spec.
-func (r *GrafanaServiceAccountReconciler) reconcileTokens(
+func (r *GrafanaServiceAccountController) reconcileTokens(
 	ctx context.Context,
 	cr *v1beta1.Grafana,
 	gClient *genapi.GrafanaHTTPAPI,
@@ -281,7 +312,7 @@ func (r *GrafanaServiceAccountReconciler) reconcileTokens(
 // createToken creates a new token in Grafana and a secret for it.
 // On error it returns a status reflecting all successful changes before the failure.
 // In case of a success it returns the status of the created token.
-func (r *GrafanaServiceAccountReconciler) createToken(
+func (r *GrafanaServiceAccountController) createToken(
 	ctx context.Context,
 	cr *v1beta1.Grafana,
 	gClient *genapi.GrafanaHTTPAPI,
@@ -334,7 +365,7 @@ func (r *GrafanaServiceAccountReconciler) createToken(
 	// The token was created, let's create a secret for it.
 	tokenKey := []byte(createResp.Payload.Key)
 	secret := model2.GetInternalServiceAccountSecret(cr, sa, *status, tokenKey, scheme)
-	err = r.client.Create(ctx, secret)
+	err = r.Client.Create(ctx, secret)
 	if err != nil {
 		return status, fmt.Errorf("creating token secret %q: %w", secret.Name, err)
 	}
@@ -347,7 +378,7 @@ func (r *GrafanaServiceAccountReconciler) createToken(
 // Returns:
 //   - nil if the token and related stuff was removed successfully
 //   - error if removal has done partially and the status should be updated
-func (r *GrafanaServiceAccountReconciler) wipeToken(
+func (r *GrafanaServiceAccountController) wipeToken(
 	ctx context.Context,
 	gClient *genapi.GrafanaHTTPAPI,
 	namespace string,
@@ -381,7 +412,7 @@ func (r *GrafanaServiceAccountReconciler) wipeToken(
 
 // wipeAccountSecrets removes all secrets for specified tokens.
 // It's not atomic. If an error occurs, it'll keep remain tokens in the status.
-func (r *GrafanaServiceAccountReconciler) wipeAccountSecrets(
+func (r *GrafanaServiceAccountController) wipeAccountSecrets(
 	ctx context.Context,
 	namespace string,
 	status *v1beta1.GrafanaServiceAccountStatus,
@@ -399,7 +430,7 @@ func (r *GrafanaServiceAccountReconciler) wipeAccountSecrets(
 	return nil
 }
 
-func (r *GrafanaServiceAccountReconciler) wipeTokenSecret(
+func (r *GrafanaServiceAccountController) wipeTokenSecret(
 	ctx context.Context,
 	namespace string,
 	status *v1beta1.GrafanaServiceAccountTokenStatus,
@@ -410,9 +441,9 @@ func (r *GrafanaServiceAccountReconciler) wipeTokenSecret(
 	}
 
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: status.SecretName}}
-	err := r.client.Delete(ctx, secret)
+	err := r.Client.Delete(ctx, secret)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if kuberr.IsNotFound(err) {
 			status.SecretName = ""
 			logf.FromContext(ctx).V(1).Info("token secret not found, skipping", "secret", secret.Name)
 			return nil
@@ -472,7 +503,7 @@ func (g *saGroups) consolidateTo(cr *v1beta1.Grafana) {
 	})
 }
 
-func (r *GrafanaServiceAccountReconciler) classifyServiceAccounts(
+func (r *GrafanaServiceAccountController) classifyServiceAccounts(
 	cr *v1beta1.Grafana,
 	existingSAs map[int64]models.ServiceAccountDTO,
 ) *saGroups {
@@ -529,7 +560,7 @@ func (g *tokenGroups) consolidateTo(status *v1beta1.GrafanaServiceAccountStatus)
 	sort.Slice(status.Tokens, func(i, j int) bool { return status.Tokens[i].Name < status.Tokens[j].Name })
 }
 
-func (r *GrafanaServiceAccountReconciler) classifyTokens(
+func (r *GrafanaServiceAccountController) classifyTokens(
 	cr *v1beta1.Grafana,
 	existingToken map[int64]models.TokenDTO,
 	existingSecrets map[string]corev1.Secret,
@@ -651,12 +682,12 @@ func listServiceAccountTokens(
 	return existingTokens, nil
 }
 
-func (r *GrafanaServiceAccountReconciler) listAllTokenSecrets(
+func (r *GrafanaServiceAccountController) listAllTokenSecrets(
 	ctx context.Context,
 	cr *v1beta1.Grafana,
 ) (map[string]map[string]corev1.Secret, error) {
 	var list corev1.SecretList
-	err := r.client.List(ctx, &list,
+	err := r.Client.List(ctx, &list,
 		client.InNamespace(cr.Namespace),
 		client.MatchingLabels{
 			"app":                              "grafana-serviceaccount-token",
@@ -680,4 +711,23 @@ func (r *GrafanaServiceAccountReconciler) listAllTokenSecrets(
 		res[specID][s.Name] = s
 	}
 	return res, nil
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func isEqualExpirationTime(a, b *metav1.Time) bool {
+	// Grafana API doesn't allow to set expiration time for tokens. Instead of it,
+	// Grafana accepts TTL then calculates the expiration time against the current time.
+	// So, we cannot just compare the expiration time with the spec' one.
+	// Let's assume that two expiration times are equal if they are close enough.
+	const expiresDrift = 1 * time.Second
+
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	diff := a.Sub(b.Time)
+	return diff.Abs() <= expiresDrift
 }
