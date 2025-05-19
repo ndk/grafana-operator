@@ -42,14 +42,21 @@ func (r *GrafanaServiceAccountController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, fmt.Errorf("getting Grafana: %w", err)
 	}
 
+	var cond *metav1.Condition
 	defer func() {
-		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latest := &v1beta1.Grafana{}
 			err := r.Client.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}, latest)
 			if err != nil {
 				return fmt.Errorf("getting Grafana %s/%s: %w", cr.Namespace, cr.Name, err)
 			}
+
 			latest.Status.GrafanaServiceAccounts = cr.Status.GrafanaServiceAccounts
+			meta.RemoveStatusCondition(&latest.Status.Conditions, conditionServiceAccountsSynced)
+			if cond != nil {
+				meta.SetStatusCondition(&latest.Status.Conditions, *cond)
+			}
+
 			return r.Status().Update(ctx, latest)
 		})
 		if err != nil {
@@ -66,27 +73,28 @@ func (r *GrafanaServiceAccountController) Reconcile(ctx context.Context, req ctr
 	recon := grafana.NewGrafanaServiceAccountReconciler(r.Client)
 	stage, err := recon.Reconcile(ctx, cr, nil, r.Scheme)
 
-	cond := metav1.Condition{
+	c := metav1.Condition{
 		Type:               conditionServiceAccountsSynced,
 		ObservedGeneration: cr.Generation,
 		LastTransitionTime: metav1.Time{Time: time.Now()},
 	}
 	if err != nil || stage != v1beta1.OperatorStageResultSuccess {
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = "ApplyFailed"
+		c.Status = metav1.ConditionFalse
+		c.Reason = "ApplyFailed"
 		if err != nil {
-			cond.Message = err.Error()
+			c.Message = err.Error()
 		} else {
-			cond.Message = "reconcile failed"
+			c.Message = "reconcile failed"
 		}
-		meta.SetStatusCondition(&cr.Status.Conditions, cond)
+		meta.SetStatusCondition(&cr.Status.Conditions, c)
 		return ctrl.Result{}, fmt.Errorf("reconciling service accounts: %w", err)
 	}
 
-	cond.Status = metav1.ConditionTrue
-	cond.Reason = "ApplySuccessful"
-	cond.Message = "service accounts reconciled"
-	meta.SetStatusCondition(&cr.Status.Conditions, cond)
+	c.Status = metav1.ConditionTrue
+	c.Reason = "ApplySuccessful"
+	c.Message = "service accounts reconciled"
+	meta.SetStatusCondition(&cr.Status.Conditions, c)
+	cond = &c
 
 	return ctrl.Result{}, nil
 }
