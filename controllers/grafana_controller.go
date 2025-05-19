@@ -172,7 +172,6 @@ func getInstallationStages() []grafanav1beta1.OperatorStageName {
 		grafanav1beta1.OperatorStageIngress,
 		grafanav1beta1.OperatorStagePlugins,
 		grafanav1beta1.OperatorStageDeployment,
-		grafanav1beta1.OperatorStageGrafanaServiceAccounts,
 		grafanav1beta1.OperatorStageComplete,
 	}
 }
@@ -195,8 +194,6 @@ func (r *GrafanaReconciler) getReconcilerForStage(stage grafanav1beta1.OperatorS
 		return grafana.NewPluginsReconciler(r.Client)
 	case grafanav1beta1.OperatorStageDeployment:
 		return grafana.NewDeploymentReconciler(r.Client, r.IsOpenShift)
-	case grafanav1beta1.OperatorStageGrafanaServiceAccounts:
-		return grafana.NewGrafanaServiceAccountReconciler(r.Client)
 	case grafanav1beta1.OperatorStageComplete:
 		return grafana.NewCompleteReconciler(r.Client)
 	default:

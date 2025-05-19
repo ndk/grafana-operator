@@ -26,16 +26,15 @@ type OperatorStageName string
 type OperatorStageStatus string
 
 const (
-	OperatorStageGrafanaConfig          OperatorStageName = "config"
-	OperatorStageAdminUser              OperatorStageName = "admin user"
-	OperatorStagePvc                    OperatorStageName = "pvc"
-	OperatorStageServiceAccount         OperatorStageName = "service account"
-	OperatorStageService                OperatorStageName = "service"
-	OperatorStageIngress                OperatorStageName = "ingress"
-	OperatorStagePlugins                OperatorStageName = "plugins"
-	OperatorStageDeployment             OperatorStageName = "deployment"
-	OperatorStageGrafanaServiceAccounts OperatorStageName = "grafana service-accounts"
-	OperatorStageComplete               OperatorStageName = "complete"
+	OperatorStageGrafanaConfig  OperatorStageName = "config"
+	OperatorStageAdminUser      OperatorStageName = "admin user"
+	OperatorStagePvc            OperatorStageName = "pvc"
+	OperatorStageServiceAccount OperatorStageName = "service account"
+	OperatorStageService        OperatorStageName = "service"
+	OperatorStageIngress        OperatorStageName = "ingress"
+	OperatorStagePlugins        OperatorStageName = "plugins"
+	OperatorStageDeployment     OperatorStageName = "deployment"
+	OperatorStageComplete       OperatorStageName = "complete"
 )
 
 const (

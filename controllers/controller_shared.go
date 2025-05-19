@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -280,6 +281,23 @@ func ignoreStatusUpdates() predicate.Predicate {
 			// Ignore updates to CR status in which case metadata.Generation does not change
 			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
 		},
+	}
+}
+
+func serviceAccountSpecChanged() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			cr, ok := e.Object.(*v1beta1.Grafana)
+			return ok && cr.Spec.GrafanaServiceAccounts != nil
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldCr, oldOk := e.ObjectOld.(*v1beta1.Grafana)
+			newCr, newOk := e.ObjectNew.(*v1beta1.Grafana)
+			return oldOk && newOk && !reflect.DeepEqual(oldCr.Spec.GrafanaServiceAccounts,
+				newCr.Spec.GrafanaServiceAccounts)
+		},
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
 }
 
