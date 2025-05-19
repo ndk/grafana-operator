@@ -10,6 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,7 +43,15 @@ func (r *GrafanaServiceAccountController) Reconcile(ctx context.Context, req ctr
 	}
 
 	defer func() {
-		err := r.Status().Update(ctx, cr)
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &v1beta1.Grafana{}
+			err := r.Client.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}, latest)
+			if err != nil {
+				return fmt.Errorf("getting Grafana %s/%s: %w", cr.Namespace, cr.Name, err)
+			}
+			latest.Status.GrafanaServiceAccounts = cr.Status.GrafanaServiceAccounts
+			return r.Status().Update(ctx, latest)
+		})
 		if err != nil {
 			log.Error(err, "updating status")
 		}
@@ -90,5 +100,6 @@ func (r *GrafanaServiceAccountController) SetupWithManager(mgr ctrl.Manager) err
 			)).
 		Owns(&corev1.Secret{}).
 		WithOptions(controller.Options{RateLimiter: defaultRateLimiter()}).
+		Named("grafanaserviceaccount").
 		Complete(r)
 }
