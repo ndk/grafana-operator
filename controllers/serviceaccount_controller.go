@@ -59,7 +59,22 @@ func (r *GrafanaServiceAccountController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, fmt.Errorf("building grafana client: %w", err)
 	}
 
-	defer func(recErr *error) {
+	cond := &metav1.Condition{
+		Type:               conditionServiceAccountsSynced,
+		LastTransitionTime: metav1.Time{Time: time.Now()},
+	}
+	err = r.reconcileAccounts(ctx, cr, gClient, r.Scheme)
+	if err == nil {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = conditionApplySuccessful
+		cond.Message = "service accounts reconciled"
+	} else {
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = conditionApplyFailed
+		cond.Message = err.Error()
+	}
+
+	defer func() {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latest := &v1beta1.Grafana{}
 			err := r.Client.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}, latest)
@@ -69,31 +84,17 @@ func (r *GrafanaServiceAccountController) Reconcile(ctx context.Context, req ctr
 
 			latest.Status.GrafanaServiceAccounts = cr.Status.GrafanaServiceAccounts
 			meta.RemoveStatusCondition(&latest.Status.Conditions, conditionServiceAccountsSynced)
-
-			cond := metav1.Condition{
-				Type:               conditionServiceAccountsSynced,
-				ObservedGeneration: cr.Generation,
-				LastTransitionTime: metav1.Time{Time: time.Now()},
-			}
-			if recErr == nil {
-				cond.Status = metav1.ConditionTrue
-				cond.Reason = conditionApplySuccessful
-				cond.Message = "service accounts reconciled"
-			} else {
-				cond.Status = metav1.ConditionFalse
-				cond.Reason = conditionApplyFailed
-				cond.Message = (*recErr).Error()
-			}
-			meta.SetStatusCondition(&latest.Status.Conditions, cond)
+			cond.ObservedGeneration = latest.Generation
+			meta.SetStatusCondition(&latest.Status.Conditions, *cond)
 
 			return r.Status().Update(ctx, latest)
 		})
 		if err != nil {
-			logf.FromContext(ctx).Error(err, "updating Grafana status")
+			logf.FromContext(ctx).Error(err, "failed to updated Grafana status")
 		}
-	}(&err)
+	}()
 
-	return ctrl.Result{}, r.reconcileAccounts(ctx, cr, gClient, r.Scheme)
+	return ctrl.Result{}, err
 }
 
 func (r *GrafanaServiceAccountController) SetupWithManager(mgr ctrl.Manager) error {
