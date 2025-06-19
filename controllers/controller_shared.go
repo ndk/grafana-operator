@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -441,4 +442,24 @@ func UpdateStatus(ctx context.Context, cl client.Client, cr v1beta1.CommonResour
 			log.Error(err, "failed to set finalizer")
 		}
 	}
+}
+
+func PatchGrafanaStatus(
+	ctx context.Context,
+	cl client.Client,
+	grafana *v1beta1.Grafana,
+	patchFunc func(status *v1beta1.GrafanaStatus),
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &v1beta1.Grafana{}
+		if err := cl.Get(ctx, client.ObjectKeyFromObject(grafana), latest); err != nil {
+			return err
+		}
+
+		patch := client.MergeFrom(latest.DeepCopy())
+
+		patchFunc(&latest.Status)
+
+		return cl.Status().Patch(ctx, latest, patch)
+	})
 }

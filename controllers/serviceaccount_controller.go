@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"sort"
 	"time"
@@ -14,8 +13,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,15 +49,6 @@ func setSuccessfulServiceAccountsCondition(cr *v1beta1.Grafana, message string) 
 	})
 }
 
-func reapplyServiceAccountsCondition(newCR *v1beta1.Grafana, oldCR *v1beta1.Grafana) {
-	cond := meta.FindStatusCondition(oldCR.Status.Conditions, conditionServiceAccountsSynchronized)
-	if cond != nil && !meta.IsStatusConditionPresentAndEqual(newCR.Status.Conditions, cond.Type, cond.Status) {
-		cond.LastTransitionTime = metav1.Time{Time: time.Now()}
-		cond.ObservedGeneration = newCR.Generation
-		meta.SetStatusCondition(&newCR.Status.Conditions, *cond)
-	}
-}
-
 type GrafanaServiceAccountReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -73,22 +61,30 @@ func (r *GrafanaServiceAccountReconciler) Reconcile(ctx context.Context, req ctr
 	err := r.Get(ctx, req.NamespacedName, cr)
 	if err != nil {
 		if kuberr.IsNotFound(err) {
-			logf.FromContext(ctx).V(1).Info("Grafana not found, skipping")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("getting Grafana %s/%s: %w", cr.Namespace, cr.Name, err)
 	}
-	logf.FromContext(ctx).V(1).Info("Reconciling GrafanaServiceAccounts", "cr", cr)
 
 	if cr.Spec.GrafanaServiceAccounts == nil && cr.Status.GrafanaServiceAccounts == nil {
-		logf.FromContext(ctx).V(1).Info("GrafanaServiceAccounts is not set, skipping")
 		return ctrl.Result{}, nil
 	}
 
 	defer func() {
-		logf.FromContext(ctx).V(1).Info("Updating Grafana status", "cr", cr)
+		err := PatchGrafanaStatus(ctx, r.Client, cr, func(status *v1beta1.GrafanaStatus) {
+			status.GrafanaServiceAccounts = cr.Status.GrafanaServiceAccounts
 
-		err := r.updateStatus(ctx, cr)
+			cond := meta.FindStatusCondition(cr.Status.Conditions, conditionServiceAccountsSynchronized)
+			if cond != nil {
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               cond.Type,
+					LastTransitionTime: cond.LastTransitionTime,
+					Status:             cond.Status,
+					Reason:             cond.Reason,
+					Message:            cond.Message,
+				})
+			}
+		})
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to update Grafana status")
 		}
@@ -97,33 +93,28 @@ func (r *GrafanaServiceAccountReconciler) Reconcile(ctx context.Context, req ctr
 
 	if !meta.IsStatusConditionPresentAndEqual(cr.Status.Conditions, ConditionTypeGrafanaReady, metav1.ConditionTrue) {
 		setFailedServiceAccountsCondition(cr, "Grafana instance isn't ready yet")
-		logf.FromContext(ctx).V(1).Info("Grafana instance isn't ready yet, requeuing")
 		return ctrl.Result{RequeueAfter: RequeueDelay}, nil
 	}
 
 	gClient, err := client2.NewGeneratedGrafanaClient(ctx, r.Client, cr)
 	if err != nil {
 		setFailedServiceAccountsCondition(cr, err.Error())
-		logf.FromContext(ctx).V(1).Error(err, "failed to build Grafana client")
 		return ctrl.Result{}, fmt.Errorf("building grafana client: %w", err)
 	}
 
 	err = r.reconcileAccounts(ctx, cr, gClient, r.Scheme)
 	if err != nil {
 		setFailedServiceAccountsCondition(cr, err.Error())
-		logf.FromContext(ctx).V(1).Error(err, "failed to reconcile service accounts")
 		return ctrl.Result{}, fmt.Errorf("reconciling service accounts: %w", err)
 	}
 	setSuccessfulServiceAccountsCondition(cr, "service accounts reconciled")
 
 	if cr.Spec.GrafanaServiceAccounts == nil {
 		// Spec is empty, so we don't need to check periodically the service accounts status.
-		logf.FromContext(ctx).V(1).Info("GrafanaServiceAccounts spec is empty, skipping periodic check")
 		return ctrl.Result{}, nil
 	}
 
 	// Let's check it later if the service accounts status is up to date.
-	logf.FromContext(ctx).V(1).Info("GrafanaServiceAccounts spec is set, requeuing for periodic check")
 	return ctrl.Result{RequeueAfter: cr.Spec.GrafanaServiceAccounts.ResyncPeriod.Duration}, nil
 }
 
@@ -139,34 +130,6 @@ func (r *GrafanaServiceAccountReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Complete(r)
 }
 
-func (r *GrafanaServiceAccountReconciler) updateStatus(ctx context.Context, cr *v1beta1.Grafana) error {
-	namespacedName := types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}
-
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		base := &v1beta1.Grafana{}
-		err := r.Get(ctx, namespacedName, base)
-		if err != nil {
-			return fmt.Errorf("getting Grafana %s/%s: %w", cr.Namespace, cr.Name, err)
-		}
-
-		newCR := base.DeepCopy()
-		newCR.Status.GrafanaServiceAccounts = cr.Status.GrafanaServiceAccounts
-		reapplyServiceAccountsCondition(newCR, cr)
-		if reflect.DeepEqual(newCR.Status, base.Status) {
-			logf.FromContext(ctx).Info("Grafana status is up to date, skipping update", "namespacedName", namespacedName.String())
-			return nil
-		}
-
-		// TODO: can we use v1beta1.Merge here?
-		err = r.Status().Patch(ctx, newCR, client.MergeFrom(base))
-		if err != nil {
-			logf.FromContext(ctx).Error(err, "failed to patch Grafana status", "generation", newCR.Generation)
-		}
-
-		return err
-	})
-}
-
 // syncAccounts checks if the service accounts status in the Grafana CR is up to date
 // with the actual service accounts in Grafana. If there are any discrepancies, it updates the status
 // accordingly. If a service account was removed from Grafana, it removes it from the status.
@@ -178,7 +141,6 @@ func (r *GrafanaServiceAccountReconciler) syncAccounts(
 	ctx = logf.IntoContext(ctx, logf.FromContext(ctx).WithName("GrafanaServiceAccountController"))
 
 	if len(cr.Status.GrafanaServiceAccounts) == 0 {
-		logf.FromContext(ctx).V(1).Info("GrafanaServiceAccounts status is empty, skipping", "namespace", cr.Namespace, "grafana", cr.Name)
 		return nil
 	}
 
@@ -205,10 +167,6 @@ func (r *GrafanaServiceAccountReconciler) syncAccounts(
 		}
 	}
 
-	logf.FromContext(ctx).V(1).Info("service accounts updated",
-		"namespace", cr.Namespace, "grafana", cr.Name, "removed", removed,
-	)
-
 	return nil
 }
 
@@ -222,24 +180,17 @@ func (r *GrafanaServiceAccountReconciler) syncTokens(
 		return fmt.Errorf("listing tokens for service account %q: %w", accountStatus.ServiceAccountID, err)
 	}
 
-	removed := 0
 	for i := 0; i < len(accountStatus.Tokens); i++ {
 		existingToken, ok := tokens[accountStatus.Tokens[i].ID]
 		if !ok {
 			// It seems that the service account token was removed from Grafana. Let's remove it from the status.
 			accountStatus.Tokens = removeFromSlice(accountStatus.Tokens, i)
-			removed++
 			i--
 			continue
 		}
 
 		actualizeTokenStatus(&accountStatus.Tokens[i], existingToken)
 	}
-
-	logf.FromContext(ctx).V(1).Info("service account tokens updated",
-		"serviceAccountID", accountStatus.ServiceAccountID,
-		"removed", removed,
-	)
 
 	return nil
 }
@@ -410,10 +361,6 @@ func (r *GrafanaServiceAccountReconciler) reconcileAccount(
 
 	form := patchAccount(spec, *status)
 	if form == nil {
-		logf.FromContext(ctx).V(1).Info("no discrepancies found, skipping update",
-			"serviceAccountID", status.ServiceAccountID,
-			"specID", status.SpecID,
-		)
 		return nil
 	}
 
@@ -573,13 +520,11 @@ func (r *GrafanaServiceAccountReconciler) removeTokenSecret(
 	if err != nil {
 		if kuberr.IsNotFound(err) {
 			tokenStatus.Secret = nil
-			logf.FromContext(ctx).V(1).Info("token secret not found, skipping", "secret", secret.Name)
 			return nil
 		}
 		return err
 	}
 	tokenStatus.Secret = nil
-	logf.FromContext(ctx).V(1).Info("token secret deleted", "secret", secret.String())
 
 	return nil
 }
@@ -606,7 +551,6 @@ func (r *GrafanaServiceAccountReconciler) removeAccountToken(
 		// So, we cannot rely only on errors.Is().
 		_, ok := err.(*service_accounts.DeleteTokenNotFound) // nolint:errorlint
 		if ok || errors.Is(err, service_accounts.NewDeleteTokenNotFound()) {
-			logf.FromContext(ctx).V(1).Info("token not found, skipping", "token", tokenStatus.Name)
 			return nil
 		}
 		return fmt.Errorf("deleting token: %w", err)
@@ -683,7 +627,6 @@ func listExistingServiceAccounts(
 
 		for _, sa := range resp.Payload.ServiceAccounts {
 			if sa == nil {
-				logf.FromContext(ctx).V(1).Info("service account is nil, skipping")
 				continue
 			}
 			serviceAccounts[sa.ID] = *sa
@@ -713,7 +656,6 @@ func listExistingTokens(
 	tokens := map[int64]models.TokenDTO{}
 	for _, token := range resp.Payload {
 		if token == nil {
-			logf.FromContext(ctx).V(1).Info("token is nil, skipping")
 			continue
 		}
 		tokens[token.ID] = *token

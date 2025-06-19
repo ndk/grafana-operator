@@ -179,9 +179,10 @@ func (r *GrafanaLibraryPanelReconciler) reconcileWithInstance(ctx context.Contex
 	name := fmt.Sprintf("%s", model["name"])
 
 	defer func() {
-		instance.Status.LibraryPanels = instance.Status.LibraryPanels.Add(cr.Namespace, cr.Name, uid)
 		//nolint:errcheck
-		_ = r.Client.Status().Update(ctx, instance)
+		_ = PatchGrafanaStatus(ctx, r.Client, instance, func(status *v1beta1.GrafanaStatus) {
+			status.LibraryPanels = status.LibraryPanels.Add(cr.Namespace, cr.Name, uid)
+		})
 	}()
 
 	resp, err := grafanaClient.LibraryElements.GetLibraryElementByUID(uid)
@@ -263,8 +264,10 @@ func (r *GrafanaLibraryPanelReconciler) finalize(ctx context.Context, libraryPan
 			}
 		}
 
-		instance.Status.LibraryPanels = instance.Status.LibraryPanels.Remove(libraryPanel.Namespace, libraryPanel.Name)
-		if err = r.Client.Status().Update(ctx, &instance); err != nil {
+		err = PatchGrafanaStatus(ctx, r.Client, &instance, func(status *v1beta1.GrafanaStatus) {
+			status.LibraryPanels = status.LibraryPanels.Remove(libraryPanel.Namespace, libraryPanel.Name)
+		})
+		if err != nil {
 			return fmt.Errorf("removing Folder from Grafana cr: %w", err)
 		}
 	}

@@ -154,8 +154,10 @@ func (r *GrafanaFolderReconciler) finalize(ctx context.Context, folder *grafanav
 			}
 		}
 
-		grafana.Status.Folders = grafana.Status.Folders.Remove(folder.Namespace, folder.Name)
-		if err = r.Status().Update(ctx, &grafana); err != nil {
+		err = PatchGrafanaStatus(ctx, r.Client, &grafana, func(status *grafanav1beta1.GrafanaStatus) {
+			status.Folders = status.Folders.Remove(folder.Namespace, folder.Name)
+		})
+		if err != nil {
 			return fmt.Errorf("removing Folder from Grafana cr: %w", err)
 		}
 	}
@@ -195,8 +197,9 @@ func (r *GrafanaFolderReconciler) onFolderCreated(ctx context.Context, grafana *
 		// - the folder was created outside of operator
 		// - the folder was created through dashboard controller
 		if found, _ := grafana.Status.Folders.Find(cr.Namespace, cr.Name); !found {
-			grafana.Status.Folders = grafana.Status.Folders.Add(cr.Namespace, cr.Name, uid)
-			err = r.Status().Update(ctx, grafana)
+			err = PatchGrafanaStatus(ctx, r.Client, grafana, func(status *grafanav1beta1.GrafanaStatus) {
+				status.Folders = status.Folders.Add(cr.Namespace, cr.Name, uid)
+			})
 			if err != nil {
 				return err
 			}
@@ -232,8 +235,9 @@ func (r *GrafanaFolderReconciler) onFolderCreated(ctx context.Context, grafana *
 			return err
 		}
 
-		grafana.Status.Folders = grafana.Status.Folders.Add(cr.Namespace, cr.Name, folderResp.Payload.UID)
-		err = r.Status().Update(ctx, grafana)
+		err = PatchGrafanaStatus(ctx, r.Client, grafana, func(status *grafanav1beta1.GrafanaStatus) {
+			status.Folders = status.Folders.Add(cr.Namespace, cr.Name, folderResp.Payload.UID)
+		})
 		if err != nil {
 			return err
 		}

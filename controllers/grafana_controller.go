@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"reflect"
 	"strings"
 	"time"
 
@@ -86,7 +85,36 @@ func (r *GrafanaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	metrics.GrafanaReconciles.WithLabelValues(cr.Namespace, cr.Name).Inc()
 
 	defer func() {
-		if err := r.updateStatus(ctx, cr); err != nil {
+		err := PatchGrafanaStatus(ctx, r.Client, cr, func(status *grafanav1beta1.GrafanaStatus) {
+			status.AdminURL = cr.Status.AdminURL
+			status.Version = cr.Status.Version
+			status.Stage = cr.Status.Stage
+			status.StageStatus = cr.Status.StageStatus
+			status.LastMessage = cr.Status.LastMessage
+
+			cond := meta.FindStatusCondition(cr.Status.Conditions, ConditionTypeGrafanaReady)
+			if cond != nil {
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               cond.Type,
+					Reason:             cond.Reason,
+					Message:            cond.Message,
+					Status:             cond.Status,
+					LastTransitionTime: cond.LastTransitionTime,
+				})
+			}
+			for _, cond := range cr.Status.Conditions {
+				if strings.HasPrefix(cond.Type, "Invalid") && strings.HasSuffix(cond.Type, "Override") {
+					meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+						Type:               cond.Type,
+						Reason:             cond.Reason,
+						Message:            cond.Message,
+						Status:             cond.Status,
+						LastTransitionTime: cond.LastTransitionTime,
+					})
+				}
+			}
+		})
+		if err != nil {
 			log.Error(err, "updating status")
 		}
 	}()
@@ -223,21 +251,34 @@ func (r *GrafanaReconciler) syncStatuses(ctx context.Context) error {
 
 	// delete resources from grafana statuses that no longer have a CR
 	statusUpdates := 0
+
 	for _, grafana := range grafanas.Items {
-		updateStatus := false
-
-		removeMissingCRs(&grafana.Status.Folders, folders, &updateStatus)
-		removeMissingCRs(&grafana.Status.Dashboards, dashboards, &updateStatus)
-		removeMissingCRs(&grafana.Status.LibraryPanels, libraryPanels, &updateStatus)
-		removeMissingCRs(&grafana.Status.Datasources, datasources, &updateStatus)
-		removeMissingCRs(&grafana.Status.ContactPoints, contactPoints, &updateStatus)
-
-		if updateStatus {
-			statusUpdates += 1
-			err = r.Client.Status().Update(ctx, &grafana)
-			if err != nil {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &grafanav1beta1.Grafana{}
+			if err := r.Client.Get(ctx, client.ObjectKeyFromObject(&grafana), latest); err != nil {
 				return err
 			}
+
+			patch := client.MergeFrom(latest.DeepCopy())
+
+			updateStatus := false
+			removeMissingCRs(&latest.Status.Folders, folders, &updateStatus)
+			removeMissingCRs(&latest.Status.Dashboards, dashboards, &updateStatus)
+			removeMissingCRs(&latest.Status.LibraryPanels, libraryPanels, &updateStatus)
+			removeMissingCRs(&latest.Status.Datasources, datasources, &updateStatus)
+			removeMissingCRs(&latest.Status.ContactPoints, contactPoints, &updateStatus)
+			if !updateStatus {
+				return nil
+			}
+
+			err = r.Client.Status().Patch(ctx, latest, patch)
+			if err != nil {
+				statusUpdates++
+			}
+			return err
+		})
+		if err != nil {
+			return err
 		}
 	}
 
@@ -245,41 +286,6 @@ func (r *GrafanaReconciler) syncStatuses(ctx context.Context) error {
 		log.Info("successfully synced grafana statuses", "update count", statusUpdates)
 	}
 	return nil
-}
-
-func (r *GrafanaReconciler) updateStatus(ctx context.Context, cr *grafanav1beta1.Grafana) error {
-	namespacedName := types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}
-
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		base := &grafanav1beta1.Grafana{}
-		if err := r.Get(ctx, namespacedName, base); err != nil {
-			return err
-		}
-
-		newCR := base.DeepCopy()
-		newCR.Status.AdminURL = cr.Status.AdminURL
-		newCR.Status.Version = cr.Status.Version
-		newCR.Status.Stage = cr.Status.Stage
-		newCR.Status.StageStatus = cr.Status.StageStatus
-		newCR.Status.LastMessage = cr.Status.LastMessage
-		cond := meta.FindStatusCondition(cr.Status.Conditions, ConditionTypeGrafanaReady)
-		if cond != nil && !meta.IsStatusConditionPresentAndEqual(newCR.Status.Conditions, cond.Type, cond.Status) {
-			cond.LastTransitionTime = metav1.Time{Time: time.Now()}
-			cond.ObservedGeneration = base.Generation
-			meta.SetStatusCondition(&newCR.Status.Conditions, *cond)
-		}
-		if reflect.DeepEqual(newCR.Status, base.Status) {
-			logf.FromContext(ctx).Info("Grafana status is up to date, skipping update", "namespacedName", namespacedName.String())
-			return nil
-		}
-
-		err := r.Status().Patch(ctx, newCR, client.MergeFrom(base))
-		if err != nil {
-			logf.FromContext(ctx).Error(err, "failed to update Grafana status", "generation", newCR.Generation)
-		}
-
-		return err
-	})
 }
 
 // SetupWithManager sets up the controller with the Manager.
