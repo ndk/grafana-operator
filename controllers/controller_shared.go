@@ -452,7 +452,8 @@ func PatchGrafanaStatus(
 ) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &v1beta1.Grafana{}
-		if err := cl.Get(ctx, client.ObjectKeyFromObject(grafana), latest); err != nil {
+		err := cl.Get(ctx, client.ObjectKeyFromObject(grafana), latest)
+		if err != nil {
 			return err
 		}
 
@@ -460,6 +461,11 @@ func PatchGrafanaStatus(
 
 		patchFunc(&latest.Status)
 
-		return cl.Status().Patch(ctx, latest, patch)
+		err = cl.Status().Patch(ctx, latest, patch)
+		if err != nil {
+			return err
+		}
+
+		return nil
 	})
 }

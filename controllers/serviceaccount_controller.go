@@ -313,8 +313,8 @@ func (r *GrafanaServiceAccountReconciler) removeAccount(
 		for ; i >= 0; i-- {
 			err := r.removeTokenSecret(ctx, &status.Tokens[i])
 			if err != nil {
-				status.Tokens = status.Tokens[:i]
-				return fmt.Errorf("removing token secret for service account %q: %w", status.SpecID, err)
+				status.Tokens = status.Tokens[:i+1]
+				return fmt.Errorf("removing token secret %q for service account %q: %w", status.Tokens[i].Name, status.SpecID, err)
 			}
 		}
 		status.Tokens = nil
