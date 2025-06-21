@@ -255,7 +255,7 @@ func (r *GrafanaReconciler) syncStatuses(ctx context.Context) error {
 	for _, grafana := range grafanas.Items {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latest := &grafanav1beta1.Grafana{}
-			if err := r.Client.Get(ctx, client.ObjectKeyFromObject(&grafana), latest); err != nil {
+			if err := r.Get(ctx, client.ObjectKeyFromObject(&grafana), latest); err != nil {
 				return err
 			}
 
