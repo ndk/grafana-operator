@@ -463,8 +463,10 @@ func PatchGrafanaStatus(
 
 		err = cl.Status().Patch(ctx, latest, patch)
 		if err != nil {
+			logf.FromContext(ctx).V(1).Error(err, "salog: Failed to patch Grafana CR", "latest", latest)
 			return err
 		}
+		logf.FromContext(ctx).V(1).Info("salog: Successfully patched Grafana CR", "latest", latest)
 
 		return nil
 	})

@@ -65,6 +65,7 @@ func (r *GrafanaServiceAccountReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return ctrl.Result{}, fmt.Errorf("getting Grafana %s/%s: %w", cr.Namespace, cr.Name, err)
 	}
+	logf.FromContext(ctx).V(1).Info("salog: Reconciling GrafanaServiceAccount", "cr", cr)
 
 	if cr.Spec.GrafanaServiceAccounts == nil && cr.Status.GrafanaServiceAccounts == nil {
 		return ctrl.Result{}, nil
@@ -458,12 +459,15 @@ func (r *GrafanaServiceAccountReconciler) createAccountToken(
 			WithBody(&cmd),
 	)
 	if err != nil {
+		logf.FromContext(ctx).V(1).Error(err, "salog: Failed to create service account token", "name", tokenSpec.Name)
 		return nil, fmt.Errorf("creating token: %w", err)
 	}
 	status := &v1beta1.GrafanaServiceAccountTokenStatus{
 		Name: createResp.Payload.Name,
 		ID:   createResp.Payload.ID,
 	}
+	logf.FromContext(ctx).V(1).Info("salog: Created service account token", "name", status.Name, "id", status.ID)
+
 	// Grafana doesn't return the expiration time in the response.
 	// So, we need to do another request to get it.
 	listResp, err := gClient.ServiceAccounts.ListTokensWithParams(
@@ -519,11 +523,23 @@ func (r *GrafanaServiceAccountReconciler) removeTokenSecret(
 	err := r.Delete(ctx, secret)
 	if err != nil {
 		if kuberr.IsNotFound(err) {
+			logf.FromContext(ctx).V(1).Info("salog: Service account token secret not found, skipping deletion",
+				"name", tokenStatus.Name, "id", tokenStatus.ID,
+				"namespace", tokenStatus.Secret.Namespace, "secretName", tokenStatus.Secret.Name,
+			)
 			tokenStatus.Secret = nil
 			return nil
 		}
+		logf.FromContext(ctx).V(1).Error(err, "salog: Failed to delete service account token secret",
+			"name", tokenStatus.Name, "id", tokenStatus.ID,
+			"namespace", tokenStatus.Secret.Namespace, "secretName", tokenStatus.Secret.Name,
+		)
 		return err
 	}
+	logf.FromContext(ctx).V(1).Info("salog: Deleted service account token secret",
+		"name", tokenStatus.Name, "id", tokenStatus.ID,
+		"namespace", tokenStatus.Secret.Namespace, "secretName", tokenStatus.Secret.Name,
+	)
 	tokenStatus.Secret = nil
 
 	return nil
@@ -547,6 +563,10 @@ func (r *GrafanaServiceAccountReconciler) removeAccountToken(
 			WithTokenID(tokenStatus.ID),
 	)
 	if err != nil {
+		logf.FromContext(ctx).V(1).Error(err, "salog: Failed to delete service account token",
+			"name", tokenStatus.Name, "id", tokenStatus.ID,
+			"serviceAccountID", accountStatus.ServiceAccountID, "specID", accountStatus.SpecID,
+		)
 		// ATM, service_accounts.DeleteTokenNotFound doesn't have Is, Unwrap, Unwrap.
 		// So, we cannot rely only on errors.Is().
 		_, ok := err.(*service_accounts.DeleteTokenNotFound) // nolint:errorlint
@@ -555,6 +575,10 @@ func (r *GrafanaServiceAccountReconciler) removeAccountToken(
 		}
 		return fmt.Errorf("deleting token: %w", err)
 	}
+	logf.FromContext(ctx).V(1).Info("salog: Deleted service account token",
+		"name", tokenStatus.Name, "id", tokenStatus.ID,
+		"serviceAccountID", accountStatus.ServiceAccountID, "specID", accountStatus.SpecID,
+	)
 
 	return nil
 }
